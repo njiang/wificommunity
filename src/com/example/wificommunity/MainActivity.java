@@ -1,5 +1,9 @@
 package com.example.wificommunity;
 
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.net.Socket;
+import java.util.HashMap;
 import java.util.List;
 
 import com.example.wificommunity.DisplayMessageActivity.WifiReceiver;
@@ -10,8 +14,11 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.net.wifi.ScanResult;
+import android.net.wifi.WifiConfiguration;
 import android.net.wifi.WifiManager;
+import android.os.AsyncTask;
 import android.os.Bundle;
+import android.os.StrictMode;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.View;
@@ -23,6 +30,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 
+
 public class MainActivity extends ActionBarActivity {
 	public final static String EXTRA_MESSAGE = "com.example.wificommunity.MESSAGE";
 	private WifiManager wifi;
@@ -30,6 +38,63 @@ public class MainActivity extends ActionBarActivity {
     private TextView textView;
     ListView listView ;
     private WifiReceiver receiverWifi;
+    private HashMap<String, ScanResult> scanResults = new HashMap<String, ScanResult>();
+    
+    private Socket dataSocket;
+    private String serverIP = "54.69.117.206";
+    private int serverPort = 5999;
+    private DataInputStream instream;
+    private DataOutputStream outstream;
+    
+    class SocketCommunicationTask extends AsyncTask<Object, Void, String> {
+
+        private Exception exception;
+        String ssid;
+        public SocketCommunicationTask(String ssid) {
+        	this.ssid = ssid;
+        }
+        
+        protected String doInBackground(Object... params) {
+            try {
+            	String command = (String)params[0];
+            	DataInputStream ins = (DataInputStream)params[1];
+            	DataOutputStream os = (DataOutputStream)params[2];
+            	os.writeUTF(command);
+            	os.flush();
+            	String response = ins.readUTF();
+                return response;
+            } catch (Exception e) {
+                this.exception = e;
+                dataSocket = null;
+                instream = null;
+                outstream = null;
+                SocketConnectionTask sct = new SocketConnectionTask();
+                sct.execute(serverIP, serverPort);
+                return null;
+            }
+        }
+
+        protected void onPostExecute(String response) {
+            // TODO: check this.exception 
+            // TODO: do something with the feed
+        	if (response != null) {
+	             WifiConfiguration conf = new WifiConfiguration();
+	             conf.SSID = "\"" + ssid + "\"";
+	             conf.preSharedKey = "\""+ response +"\"";
+	             wifi.addNetwork(conf);
+	             
+	             List<WifiConfiguration> list = wifi.getConfiguredNetworks();
+	             for( WifiConfiguration i : list ) {
+	                 if(i.SSID != null && i.SSID.equals("\"" + ssid + "\"")) {
+	                      wifi.disconnect();
+	                      wifi.enableNetwork(i.networkId, true);
+	                      wifi.reconnect();               
+	                      break;
+	                 }           
+	              }
+            }
+        }
+    }
     
     class WifiReceiver extends BroadcastReceiver {
         public void onReceive(Context c, Intent intent) {
@@ -38,7 +103,9 @@ public class MainActivity extends ActionBarActivity {
             String[] values = new String[wifiList.size()];
             for(int i = 0; i < wifiList.size(); i++){
             	ScanResult network = wifiList.get(i);
-            	values[i] = new String(network.SSID + " " + network.capabilities);
+            	values[i] = new String(network.BSSID + ";;;" + network.SSID);
+            	scanResults.put(network.BSSID, network);
+            	
                 //sb.append(Integer.valueOf(i+1).toString() + ".");
                 //sb.append(network.SSID + " " + network.capabilities);
                 //sb.append("\n");
@@ -59,19 +126,70 @@ public class MainActivity extends ActionBarActivity {
                    int position, long id) {
                       
                      // ListView Clicked item index
-                	 int itemPosition     = position;
+                	 int itemPosition = position;
              
 		             // ListView Clicked item value
-		             String  itemValue    = (String) listView.getItemAtPosition(position);
+		             String  itemValue = (String) listView.getItemAtPosition(position);
 		                
 		             // Show Alert 
 		             Toast.makeText(getApplicationContext(),
 		                "Position :"+itemPosition+"  ListItem : " +itemValue , Toast.LENGTH_LONG)
 		                .show();
-		           
+		             
+		             try {
+		            	 // Get BSSID
+		            	 String bssid = itemValue.split(";;;")[0];
+		            	 String ssid = itemValue.split(";;;")[1];
+			             // Contact server to get password
+			             String command = "GetPassword;;;" + bssid;
+			             //outstream.writeChars(command);
+			             if (dataSocket != null) {
+				             SocketCommunicationTask sct = new SocketCommunicationTask(ssid);
+				             sct.execute(command, instream, outstream);
+			             }
+			             else {
+			            	 SocketConnectionTask sct = new SocketConnectionTask();
+			                 sct.execute(serverIP, serverPort);
+			             }
+			             
+		             }
+		             catch (Exception e) {
+		            	 System.out.println("Failed to connect to Wifi " + e.getMessage());
+		            	 e.printStackTrace();
+		             }
 		           }
   
             }); 
+        }
+    }
+    
+    class SocketConnectionTask extends AsyncTask<Object, Void, Socket> {
+
+        private Exception exception;
+
+        protected Socket doInBackground(Object... params) {
+            try {
+            	String url = (String)params[0];
+            	int port = ((Integer)params[1]).intValue();
+                return new Socket(url, port);
+            } catch (Exception e) {
+                this.exception = e;
+                return null;
+            }
+        }
+
+        protected void onPostExecute(Socket socket) {
+            // TODO: check this.exception 
+            // TODO: do something with the feed
+        	dataSocket = socket;
+        	try {
+	        	instream = new DataInputStream(dataSocket.getInputStream());
+	        	outstream = new DataOutputStream(dataSocket.getOutputStream());
+        	}
+        	catch (Exception e) {
+        		System.out.println("Failed to get streams of socket " + e.getMessage());
+        		socket = null;
+        	}
         }
     }
     
@@ -80,6 +198,9 @@ public class MainActivity extends ActionBarActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
         listView = (ListView) findViewById(R.id.list);
+        
+        SocketConnectionTask sct = new SocketConnectionTask();
+        sct.execute(this.serverIP, this.serverPort);
     }
 
 
